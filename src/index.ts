@@ -1,20 +1,38 @@
 import 'reflect-metadata';
-import * as dotenv from 'dotenv';
-import * as path from 'path';
+// import { IncomingMessage } from 'http';
+import { Container } from 'typedi';
+import { Server } from './server';
+import { cache } from './utils/cache';
+import { logger } from './utils/logger';
 
-const envFilePath=path.join(process.cwd(), `.env`)
-dotenv.config({path: envFilePath});
+const log = logger(__filename);
 
-import {Server} from "./server";
-import http, {IncomingMessage, ServerResponse} from "http";
-import {Container} from 'typedi';
+process.once('unhandledRejection', async (error) => {
+  console.log(error);
+  process.exit(1);
+});
 
-const server = Container.get<Server>(Server)
-const httpServer:http.Server = server.start();
-httpServer.on('error',err=>{
-    console.error(`Error occurred:${err}`)
-})
-/*
-httpServer.on('request',(req: IncomingMessage, res: ServerResponse)  => {
-    console.log(`Request received ${req.url}`)
-} )*/
+const main = async (): Promise<void> => {
+  const server = Container.get<Server>(Server);
+  const httpServer = await server.start();
+
+  // Graceful Shutdown handler
+  process.once('SIGTERM', async () => {
+    log.debug('SIGTERM signal received: closing HTTP server');
+    await server.stop();
+    await cache.stop();
+  });
+
+  httpServer.on('error', (err) => {
+    log.error('Error occurred (server):', err);
+  });
+
+  // httpServer.on('request',(req: IncomingMessage) => {
+  //   console.log(`Request received ${req.url}`)
+  // });
+};
+
+export default main().catch(async (err) => {
+  log.error('Error occurred (main):', err);
+  process.exit(1);
+});

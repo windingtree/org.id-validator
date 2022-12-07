@@ -1,4 +1,7 @@
 .env
 .env*
-node_modules/
-dist/
+!.env.example
+node_modules
+dist
+.eslintcache
+.npmrc

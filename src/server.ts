@@ -1,164 +1,247 @@
-import 'reflect-metadata';
-import express, {Response,Request} from 'express'
-import http from "http";
-import {decodeJWT, JWTValidator, LoggerFactory} from "@simardwt/winding-tree-utils"
-import {Inject, Service} from 'typedi';
+import express, { Response } from 'express';
+import http from 'http';
+import helmet from 'helmet';
+import cors from 'cors';
+import { Service } from 'typedi';
+import {
+  decodeJwt,
+  verifyAuthJWT,
+  verifyAuthJWTWithEthers,
+} from '@windingtree/org.id-auth/dist/tokens';
+import { resolver } from './utils/resolver';
+import { extractVerificationMethod } from './utils/orgId';
+import { PORT, ALLOWED_ORIGINS } from './config';
+import { cache } from './utils/cache';
+import { logger } from './utils/logger';
 
-const log = LoggerFactory.createLogger(__filename)
-const PORT = process.env.APP_PORT||8080;
-
-//if flag is true, we will check of whitelisted ORGiDs (and skip JWT validation against public key!!!!)
-//use it only in non PROD
-const WHITELIST_ENABLED = process.env.WHITELIST_ENABLED === "true"
-
-
-interface ORGiDProfile {
-    orgID: string;
-    comment?: string;
-    orgIDSchema?:any
-}
-
-const WHITELISTED_ORGIDS: ORGiDProfile[] = [
-    {
-        orgID: '0x16bec77e1890c9c790b2e1c339a78ad561148e0cae7da9cb50c4c1cd64d77fe6',
-        comment: 'EY Leisure (ropsten)',
-    },
-    {
-        orgID: '0xce981ebc76d3b45cac65565046ef11a096ecffdd8d1dd44cd3c47cfdac803ed6',
-        comment: 'EY Business (ropsten)',
-    },
-];
-
-const isOrgIDWhitelisted = (orgID:string):boolean => {
-    return getWhitelistedOrgID(orgID) !== undefined;
-}
-
-
-const getWhitelistedOrgID = (orgID:string):ORGiDProfile => {
-    return WHITELISTED_ORGIDS.find(o=>o.orgID === orgID);
-}
-
-
+const log = logger(__filename);
 
 @Service()
-export class Server{
-    public app: express.Application;
+export class Server {
+  protected server: http.Server;
+  protected app: express.Application;
 
-    @Inject()
-    jwtValidator: JWTValidator
+  constructor() {
+    this.app = express();
 
-    constructor() {
-        this.app = express();
-        this.setup();
+    // CORS setup
+    const corsOptions = {
+      origin: ALLOWED_ORIGINS,
+      optionsSuccessStatus: 200,
+      methods: 'GET,PUT,POST,DELETE,PATCH,OPTIONS',
+      allowedHeaders:
+        'Origin,X-Requested-With,Content-Type,Accept,Authorization',
+      exposedHeaders: 'Content-Range,X-Content-Range',
+      credentials: true,
+    };
+    log.info('CORS options:', corsOptions);
+    this.app.use(cors(corsOptions));
+
+    // Helmet setup
+    this.app.set('trust proxy', 1);
+    this.app.disable('x-powered-by');
+    this.app.use(helmet());
+    this.app.use(helmet.contentSecurityPolicy());
+    this.app.use(helmet.crossOriginEmbedderPolicy());
+    this.app.use(helmet.crossOriginOpenerPolicy());
+    this.app.use(helmet.crossOriginResourcePolicy());
+    this.app.use(helmet.dnsPrefetchControl());
+    this.app.use(helmet.expectCt());
+    this.app.use(helmet.frameguard());
+    this.app.use(helmet.hidePoweredBy());
+    this.app.use(helmet.hsts());
+    this.app.use(helmet.ieNoOpen());
+    this.app.use(helmet.noSniff());
+    this.app.use(helmet.originAgentCluster());
+    this.app.use(helmet.permittedCrossDomainPolicies());
+    this.app.use(helmet.referrerPolicy());
+    this.app.use(helmet.xssFilter());
+
+    // Routes setup
+    this.setup();
+  }
+
+  private setup(): void {
+    log.info('OrgId validator starting up');
+
+    // Ping-pong endpoint
+    this.app.get('/test', (_, res) => {
+      res.status(200).send({
+        status: 'OK',
+      });
+    });
+
+    // JWT validation
+    this.app.get('/jwt', async (req, res) => {
+      const jwt = req.query['jwt'] as string;
+      const audience = req.query['audience'] as string;
+      const scope = (req.query['scope'] as string | undefined)?.split(',');
+      log.debug(`GET /jwt, parameters: jwt=${jwt}, audience=${audience}`);
+
+      if (!jwt || jwt.length === 0) {
+        return res.status(400).send({
+          error: 'Missing JWT parameter',
+        });
+      }
+
+      try {
+        await this.handleJWT(jwt, audience, res, scope);
+        log.debug('JWT successfully validated');
+      } catch (e) {
+        log.warn('Cannot validate JWT, got error:', e);
+      }
+    });
+
+    // ORGiD resolution
+    this.app.get('/orgid', async (req, res) => {
+      const orgid: string = req.query['orgid'] as string;
+      log.debug(`GET /orgid, parameters: orgid=${orgid}`);
+
+      if (!orgid || orgid.length === 0) {
+        const errorMessage = 'Missing orgid parameter';
+        log.error(errorMessage);
+        return res.status(400).send({
+          error: errorMessage,
+        });
+      }
+
+      try {
+        await this.handleORGID(orgid, res);
+      } catch (e) {
+        log.warn('Cannot retrieve orgID, got error:', e);
+      }
+    });
+  }
+
+  private async handleJWT(
+    jwt: string,
+    audience: string,
+    res: Response,
+    scope?: string[]
+  ): Promise<void> {
+    try {
+      log.debug('Starting validation of JWT:', jwt);
+
+      const rowJwtPayload = decodeJwt(jwt);
+      log.debug('Issuer found in JWT:', rowJwtPayload.iss);
+
+      if (!rowJwtPayload.iss) {
+        throw new Error('Issuer not found in the JWT payload');
+      }
+
+      let resolutionResponse = await cache.getResponse(rowJwtPayload.iss);
+
+      if (!resolutionResponse) {
+        resolutionResponse = await resolver.resolve(rowJwtPayload.iss);
+        await cache.storeResponse(rowJwtPayload.iss, resolutionResponse);
+      }
+
+      log.debug('Resolution response:', resolutionResponse);
+
+      if (resolutionResponse.didDocument === null) {
+        const errMessage = `Resolution of ${rowJwtPayload.iss} is failed`;
+        log.warn(errMessage);
+        res.status(404).send({
+          status: 'FAILED',
+          payload: rowJwtPayload,
+          resolutionResponse,
+          error: errMessage,
+        });
+        return;
+      }
+
+      const { blockchainAccountId, publicKeyJwk } = extractVerificationMethod(
+        resolutionResponse.didDocument,
+        rowJwtPayload.iss // this did contains `fragment` with key Id
+      );
+      log.debug('Found verification public key:', publicKeyJwk);
+
+      let result;
+
+      if (blockchainAccountId) {
+        result = await verifyAuthJWTWithEthers(
+          jwt,
+          blockchainAccountId,
+          rowJwtPayload.iss,
+          audience,
+          scope
+        );
+      } else if (publicKeyJwk) {
+        result = await verifyAuthJWT(
+          jwt,
+          publicKeyJwk,
+          rowJwtPayload.iss,
+          audience,
+          scope
+        );
+      } else {
+        throw new Error(`Public key not found in the verification method`);
+      }
+
+      log.debug('Verified JWT payload:', result.payload);
+
+      res.status(200).send({
+        status: 'OK',
+        payload: result.payload,
+        resolutionResponse,
+      });
+    } catch (err) {
+      log.warn(err.message || 'Unknown verification error');
+      res.status(404).send({
+        status: 'FAILED',
+        error: err,
+      });
     }
+  }
 
-    private setup():void {
-        log.info('OrgId validator starting up');
-        this.app.get('/test', (req,res)=>{
-            res.status(200).send({
-                status:'OK123'
-            })
-        })
-        this.app.get('/jwt', async (req, res) => {
-            let jwt:string = req.query['jwt'] as string;
-            let audience:string = req.query['audience'] as string;
-            log.debug(`GET /jwt, parameters: jwt=${jwt}, audience=${audience}`);
-            if (!jwt || jwt.length === 0) {
-                res.status(400).send({
-                    error: 'Missing JWT parameter'
-                });
-            }
-            try {
-                await this.handleJWT(jwt, audience, req, res);
-                log.debug("JWT successfully validated")
-            }catch(e){
-                log.warn('Cannot validate JWT, got error:',e)
-            }
-        })
+  private async handleORGID(did: string, res: Response): Promise<void> {
+    try {
+      log.debug('Starting resolution of ORGiD:', did);
 
-        this.app.get('/orgid', async (req, res) => {
-            let orgid:string = req.query['orgid'] as string;
-            log.debug(`GET /orgid, parameters: orgid=${orgid}`);
-            if (!orgid || orgid.length === 0) {
-                res.status(400).send({
-                    error: 'Missing orgid parameter'
-                });
-            }
-            try {
-                await this.handleORGID(orgid, req, res);
-                log.debug("ORGiD successfully retrieved")
-            }catch(e){
-                log.warn('Cannot retrieve orgID, got error:',e)
-            }
-        })
+      let resolutionResponse = await cache.getResponse(did);
 
+      if (!resolutionResponse) {
+        resolutionResponse = await resolver.resolve(did);
+        await cache.storeResponse(did, resolutionResponse);
+      }
+
+      log.debug('Resolution response:', resolutionResponse);
+
+      res.status(200).send({
+        resolutionResponse,
+      });
+    } catch (err) {
+      log.warn(err);
+      res.status(404).send({
+        status: 'FAILED',
+        error: err,
+      });
     }
+  }
 
-    private async handleJWT(jwt: string, audience:string|undefined, req: Request, res: Response): Promise<void> {
-        try {
-            let decodedJWT = decodeJWT(jwt as string);
-            let validationResponse;
-            if(WHITELIST_ENABLED && isOrgIDWhitelisted(decodedJWT.issuerDID)){
-                //we may have some whitelisted ORGiDs to skip validation (due to Ropsten being sunset)
-                //in that case return successful validation and fake orgID schema
-                validationResponse={
-                    orgIDSchema: getWhitelistedOrgID(decodedJWT.issuerDID).orgIDSchema,
-                    status: 'ValidatedOK'
-                }
-            }else {
-                // const orgID = await retrieveORGiDJSON(decodedJWT.audience);
-                validationResponse = await this.jwtValidator.validate(jwt as string);
-            }
-            let comment='';
-            //if audience param is present, validate audience too (and only if JWT validation was correct)
-            if(validationResponse.status === 'ValidatedOK' && audience && audience.length>0){
-                const expectedAudience = audience.toUpperCase().trim()
-                const jwtAudience = (decodedJWT && decodedJWT.audience)?decodedJWT.audience.toUpperCase().trim():''
-                if(expectedAudience !== jwtAudience){
-                    validationResponse.status = "NotValidated";
-                }
-            }
-            res.status(200).send({
-                status: validationResponse.status === 'ValidatedOK'?'OK':'NOT_OK',
-                payload: validationResponse.status === 'ValidatedOK'?decodedJWT:undefined,
-                orgIDSchema: validationResponse.status === 'ValidatedOK'?validationResponse.orgIDSchema:undefined
-            })
-        } catch (err) {
-            log.warn(err);
-            res.status(404).send({
-                status: 'NOK',
-                error:err
-            })
-        }
-    }
+  async start(): Promise<http.Server> {
+    return await new Promise((resolve, reject) => {
+      try {
+        this.server = this.app.listen(PORT, () => {
+          console.log(`Server listening on port ${PORT}`);
+          resolve(this.server);
+        });
+      } catch (e) {
+        log.error('Error during start:', e);
+        reject(e);
+      }
+    });
+  }
 
-    private async handleORGID(orgid: string, req: Request, res: Response): Promise<void> {
-        try {
-            let orgIDSchema;
-            let orgIDWithoutDID = orgid;
-            if(orgid.startsWith('did:orgid:')){
-                orgIDWithoutDID = orgid.substring(10)
-            }
-            if(WHITELIST_ENABLED && isOrgIDWhitelisted(orgIDWithoutDID)){
-                orgIDSchema = getWhitelistedOrgID(orgIDWithoutDID).orgIDSchema
-            }else {
-                orgIDSchema = await this.jwtValidator.retrieveOrgIdJSON(orgid);
-            }
-            res.status(200).send({
-                orgIDSchema:orgIDSchema
-            })
-        } catch (err) {
-            log.warn(err);
-            res.status(404).send({
-                status: 'NOK',
-                error:err
-            })
-        }
-    }
-
-    public start():http.Server{
-        return this.app.listen(PORT,()=>{
-            log.info(`Server listening on port ${PORT}`)
-        })
-    }
+  async stop(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      try {
+        this.server.once('close', resolve);
+        this.server.close();
+      } catch (e) {
+        log.error('Error during stop:', e);
+        reject(e);
+      }
+    });
+  }
 }
