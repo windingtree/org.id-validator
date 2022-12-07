@@ -1026,6 +1026,17 @@
     jose "4.10.0"
     luxon "3.0.4"
 
+"@windingtree/org.id-auth@^1.2.4":
+  version "1.2.4"
+  resolved "https://registry.yarnpkg.com/@windingtree/org.id-auth/-/org.id-auth-1.2.4.tgz#a256fdf4fe8669f766b285e11f4427fbab35a6ae"
+  integrity sha512-AkolYfbARu3mixlQoQVgR0A2csdwh3SlrO3AGlKN3t4TxlffcqV/SXv+/LtyZZJNgoSp/DcN7ds45j7rsNdWiA==
+  dependencies:
+    "@windingtree/org.id-utils" "^1.2.4"
+    "@windingtree/org.json-schema" "1.0.2"
+    ethers "5.7.1"
+    jose "4.10.0"
+    luxon "3.0.4"
+
 "@windingtree/org.id-core@^1.2.3":
   version "1.2.3"
   resolved "https://registry.yarnpkg.com/@windingtree/org.id-core/-/org.id-core-1.2.3.tgz#38dac3751ed27e2e0fe5536d90844748c42acbe2"
@@ -1052,6 +1063,16 @@
   version "1.2.3"
   resolved "https://registry.yarnpkg.com/@windingtree/org.id-utils/-/org.id-utils-1.2.3.tgz#53d066646f0496cd360aeda6f08d8a8b4d549bbf"
   integrity sha512-czCmQ6MyPGglUoVDDGqlGw53ciinTtNbZ6SETMqICybyzQh3BKB2Oez0+yaZNAdDlp6c04s09anChHvUasQvng==
+  dependencies:
+    ajv "8.11.0"
+    ajv-formats "2.1.1"
+    axios "1.1.3"
+    ethers "5.7.1"
+
+"@windingtree/org.id-utils@^1.2.4":
+  version "1.2.4"
+  resolved "https://registry.yarnpkg.com/@windingtree/org.id-utils/-/org.id-utils-1.2.4.tgz#e8ae8fd34849eeea567ad35c2e2c6ee5792784b6"
+  integrity sha512-HsZUqmY8zRNCzPaZibJAopOhSIkiglH2W/Or6hGCXtToPUQ3hHkL7F649AxeS+7kSqWvRl/+TebfB7T+uiR9vw==
   dependencies:
     ajv "8.11.0"
     ajv-formats "2.1.1"

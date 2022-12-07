@@ -84,6 +84,12 @@ export class Server {
         });
       }
 
+      if (!audience || audience.length === 0) {
+        return res.status(400).send({
+          error: 'Missing audience parameter',
+        });
+      }
+
       try {
         await this.handleJWT(jwt, audience, res, scope);
         log.debug('JWT successfully validated');
