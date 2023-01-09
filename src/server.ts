@@ -100,8 +100,8 @@ export class Server {
 
     // ORGiD resolution
     this.app.get('/orgid', async (req, res) => {
-      const orgid: string = req.query['orgid'] as string;
-      log.debug(`GET /orgid, parameters: orgid=${orgid}`);
+      const { orgid, force } = req.query;
+      log.debug(`GET /orgid, parameters: orgid=${orgid} force=${force}`);
 
       if (!orgid || orgid.length === 0) {
         const errorMessage = 'Missing orgid parameter';
@@ -112,7 +112,7 @@ export class Server {
       }
 
       try {
-        await this.handleORGID(orgid, res);
+        await this.handleORGID(orgid as string, force !== undefined, res);
       } catch (e) {
         log.warn('Cannot retrieve orgID, got error:', e);
       }
@@ -200,13 +200,17 @@ export class Server {
     }
   }
 
-  private async handleORGID(did: string, res: Response): Promise<void> {
+  private async handleORGID(
+    did: string,
+    force: boolean,
+    res: Response
+  ): Promise<void> {
     try {
       log.debug('Starting resolution of ORGiD:', did);
 
       let resolutionResponse = await cache.getResponse(did);
 
-      if (!resolutionResponse) {
+      if (force !== undefined || !resolutionResponse) {
         resolutionResponse = await resolver.resolve(did);
         await cache.storeResponse(did, resolutionResponse);
       }
